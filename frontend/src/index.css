@@ -1,0 +1,18 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", "Segoe UI", sans-serif;
+  --color-ink: #142235;
+  --color-muted: #64748b;
+  --color-canvas: #f5f6f8;
+  --color-brand: #16765c;
+  --color-brand-dark: #105943;
+}
+
+@layer base {
+  body { @apply m-0 bg-canvas font-sans text-ink antialiased; }
+  button, a, input, select { @apply focus-visible:outline-2 focus-visible:outline-offset-3 focus-visible:outline-brand; }
+  button:not(:disabled), select { @apply cursor-pointer; }
+  button:disabled { @apply cursor-not-allowed; }
+  ::selection { @apply bg-emerald-100 text-ink; }
+}
