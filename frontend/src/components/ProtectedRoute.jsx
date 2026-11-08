@@ -9,5 +9,6 @@ export default function ProtectedRoute() {
   if (loading) return <Loading full label="Verificando tu sesión…" />;
   if (error) return <div className="mx-auto flex min-h-screen max-w-md flex-col justify-center gap-5 px-6"><Alert>{error}</Alert><Button onClick={retry}>Reintentar conexión</Button><Button variant="secondary" onClick={logout}>Volver al ingreso</Button></div>;
   if (!user) return <Navigate to="/login" replace />;
+  if (user.role !== 'admin' && !/^\/propiedades\/?$/.test(location.pathname)) return <Navigate to="/propiedades" replace />;
   return <Outlet />;
 }

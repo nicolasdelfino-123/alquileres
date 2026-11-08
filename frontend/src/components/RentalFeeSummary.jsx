@@ -1,0 +1,11 @@
+import { money } from '../lib/format';
+
+export default function RentalFeeSummary({contract,rentAmount,charge,settlements=[],year,month}) {
+ const rent=Number(charge?.rent_amount??rentAmount??contract.current_rent??0);
+ const percent=Number(charge?.administration_percentage??contract.administration_percentage??0);
+ const fees=Math.round((rent*percent/100+Number.EPSILON)*100)/100;
+ const net=Math.round((rent-fees+Number.EPSILON)*100)/100;
+ const records=settlements.filter(record=>!record.cancelled_at&&record.property_id===contract.property_id&&record.period_year===Number(year)&&record.period_month===Number(month));
+ const total=key=>records.reduce((sum,record)=>sum+Number(record[key]||0),0);
+ return <section aria-label="Honorarios y neto del alquiler" className="rounded-xl border border-emerald-100 bg-emerald-50/40 p-4"><div className="grid gap-4 sm:grid-cols-3"><div><p className="text-[11px] text-muted">Honorarios de administración</p><p className="mt-1 text-lg font-semibold text-brand">{percent.toLocaleString('es-AR',{maximumFractionDigits:2})}%</p></div><div><p className="text-[11px] text-muted">Importe de honorarios · estimado</p><p className="mt-1 text-lg font-semibold">{money(fees,contract.currency)}</p></div><div><p className="text-[11px] text-muted">Neto a liquidar · estimado</p><p className="mt-1 text-lg font-semibold">{money(net,contract.currency)}</p></div></div><p className="mt-3 text-[11px] leading-5 text-muted">Sobre el alquiler de {money(rent,contract.currency)}, sin servicios ni otros descuentos. La liquidación definitiva usa lo efectivamente cobrado.</p>{records.length>0&&<div className="mt-3 grid gap-3 border-t border-emerald-100 pt-3 sm:grid-cols-3"><div><p className="text-[11px] text-muted">Honorarios ya liquidados</p><p className="mt-1 text-sm font-semibold">{money(total('administration_fee'),contract.currency)}</p></div><div><p className="text-[11px] text-muted">Neto ya liquidado</p><p className="mt-1 text-sm font-semibold">{money(total('net_amount'),contract.currency)}</p></div><div><p className="text-[11px] text-muted">Pendiente de transferir</p><p className="mt-1 text-sm font-semibold text-brand">{money(total('outstanding_balance'),contract.currency)}</p></div><p className="text-[10px] text-muted sm:col-span-3">Liquidaciones de esta propiedad · {String(month).padStart(2,'0')}/{year}.</p></div>}</section>;
+}

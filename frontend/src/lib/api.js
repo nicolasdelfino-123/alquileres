@@ -4,7 +4,7 @@ export class ApiError extends Error {
   constructor(message, status) { super(message); this.status = status; }
 }
 
-export async function api(path, { body, method = 'GET', auth = true, signal } = {}) {
+export async function api(path, { body, formData, method = 'GET', auth = true, signal } = {}) {
   const headers = { Accept: 'application/json' };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (auth) {
@@ -14,7 +14,7 @@ export async function api(path, { body, method = 'GET', auth = true, signal } = 
   let response;
   try {
     response = await fetch(`${API_URL}${path}`, {
-      method, headers, signal, ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      method, headers, signal, ...(formData ? { body: formData } : body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
   } catch (error) {
     if (error.name === 'AbortError') throw error;
@@ -51,3 +51,37 @@ export const personApi = resourceApi('/persons');
 export const ownerApi = resourceApi('/property-owners');
 export const contractApi = resourceApi('/contracts');
 export const chargeApi = { list: (contractId, signal) => api(`/charges?${new URLSearchParams({ contract_id: contractId })}`, { signal }) };
+
+export const workspaceApi = (filters, signal) => api(`/workspace?${new URLSearchParams(filters)}`, { signal });
+export const financeApi = {
+  generate: (body) => api('/charges/generate', { method: 'POST', body }),
+  payment: (body) => api('/payments', { method: 'POST', body }),
+  settlement: (body) => api('/settlements', { method: 'POST', body }),
+  transfer: (body) => api('/transfers', { method: 'POST', body }),
+  adjust: (id, body) => api(`/contracts/${id}/apply-adjustment`, { method: 'POST', body }),
+  cancel: (resource, id, reason) => api(`/${resource}/${id}/cancel`, { method: 'POST', body: { reason } }),
+};
+export const expenseApi = resourceApi('/expenses');
+export const reminderApi = resourceApi('/reminders');
+export const documentApi = {
+  list: (signal, filters) => api(`/documents?${new URLSearchParams(filters || {})}`, { signal }),
+  upload: (formData) => api('/files', { method: 'POST', formData }),
+  link: (body) => api('/documents', { method: 'POST', body }),
+};
+export async function downloadDocument(document) {
+  if (document.file_path.startsWith('https://')) { window.open(document.file_path, '_blank', 'noopener,noreferrer'); return; }
+  const token = sessionStorage.getItem(TOKEN_KEY);
+  const response = await fetch(`${API_URL}/files/${document.id}`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!response.ok) throw new Error('No se pudo descargar el archivo.');
+  const url = URL.createObjectURL(await response.blob());
+  const link = window.document.createElement('a'); link.href = url; link.download = document.original_filename; link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+
+export async function documentFile(document) {
+  const token=sessionStorage.getItem(TOKEN_KEY);
+  const response=await fetch(`${API_URL}/files/${document.id}`,{headers:{Authorization:`Bearer ${token}`}});
+  if(!response.ok)throw new Error('No se pudo preparar uno de los comprobantes.');
+  const blob=await response.blob();
+  return new File([blob],document.original_filename,{type:blob.type});
+}

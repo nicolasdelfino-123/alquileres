@@ -1,7 +1,7 @@
 import { AlertCircle, CheckCircle2, LoaderCircle, X, Building2 } from 'lucide-react';
 
 export function Brand({ light = false }) {
-  return <div className="flex items-center gap-3"><span className={`flex size-10 items-center justify-center rounded-xl ${light ? 'bg-white/10 text-emerald-200' : 'bg-ink text-emerald-200'}`}><Building2 size={23} strokeWidth={1.7} /></span><div><span className={`block text-[23px] leading-none font-bold tracking-[0.08em] ${light ? 'text-white' : 'text-ink'}`}>PAKO<span className="text-emerald-400">.</span></span><span className={`mt-1 block text-[10px] font-medium tracking-[0.18em] uppercase ${light ? 'text-slate-400' : 'text-muted'}`}>Inmobiliaria</span></div></div>;
+  return <div className="flex items-center gap-3"><span className={`flex size-10 items-center justify-center rounded-xl ${light ? 'bg-white/10 text-emerald-200' : 'bg-ink text-emerald-200'}`}><Building2 size={23} strokeWidth={1.7} /></span><div><span className={`block text-[23px] leading-none font-bold tracking-[0.08em] ${light ? 'text-white' : 'text-ink'}`}>BRICKS<span className="text-emerald-400">.</span></span><span className={`mt-1 block text-[10px] font-medium tracking-[0.18em] uppercase ${light ? 'text-slate-400' : 'text-muted'}`}>Bienes Raíces</span></div></div>;
 }
 export function Button({ children, variant = 'primary', className = '', ...props }) {
   const styles = { primary: 'bg-brand text-white hover:bg-brand-dark shadow-sm', secondary: 'border border-slate-200 bg-white text-ink hover:bg-slate-50', ghost: 'text-muted hover:bg-slate-100 hover:text-ink' };

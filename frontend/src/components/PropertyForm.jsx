@@ -1,32 +1,51 @@
-import { useState } from 'react';
-import { Building2, LoaderCircle } from 'lucide-react';
-import { propertyApi } from '../lib/api';
-import { PROPERTY_STATUSES } from '../lib/format';
-import { Alert, Button, Field, inputClasses } from './ui';
-import Dialog from './Dialog';
+import { useEffect, useState } from 'react';
+import { propertyApi, personApi } from '../lib/api';
+import { PROPERTY_STATUSES, personName, decimalInput } from '../lib/format';
+import { FormShell, TextField } from './EntityUI';
+import { Button, Field, inputClasses } from './ui';
+import PersonForm from './PersonForm';
+import { UtilityRulesEditor } from './UtilityRules';
 
+const optional = ['title','property_type','unit','floor','city','province','neighborhood','postal_code','registry_number','internal_code','rooms','bedrooms','bathrooms','total_area','covered_area','condition','utility_electricity','utility_water','utility_gas','utility_municipal','utility_provincial','notes','agency_ownership_percentage'];
+const numeric = ['rooms','bedrooms','bathrooms'];
+const decimal = ['total_area','covered_area','agency_ownership_percentage'];
 export default function PropertyForm({ property, onClose, onSaved }) {
-  const editing = Boolean(property);
-  const [values, setValues] = useState({
-    title: property?.title || '', address: property?.address || '', price: property?.price?.toString() || '',
-    operation_type: property?.operation_type || 'alquiler', status: property?.status || 'available',
-  });
+  const [values, setValues] = useState(() => ({ ...Object.fromEntries(optional.map((key) => [key, property?.[key] ?? ''])), address: property?.address || '', price: property?.price || '', operation_type: property?.operation_type || 'alquiler', status: property?.status || 'available' }));
+  const [utilityRules,setUtilityRules]=useState(property?.utility_rules || Object.entries({electricity:'utility_electricity',water:'utility_water',gas:'utility_gas',municipal:'utility_municipal',provincial:'utility_provincial'}).filter(([,key])=>property?.[key]).map(([service,key])=>({service,reference:property[key],payer:'undefined',management:'undefined',frequency:'occasional',notes:'',day:null})));
+  const [owners, setOwners] = useState(property?.ownerships || []);
+  const [people, setPeople] = useState([]);
+  const [newOwner, setNewOwner] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const change = (event) => setValues((current) => ({ ...current, [event.target.name]: event.target.value }));
+  const [peopleError, setPeopleError] = useState('');
+  useEffect(() => { const controller = new AbortController(); personApi.list(controller.signal).then(setPeople).catch((error) => { if (error.name !== 'AbortError') setPeopleError('No se pudieron cargar los propietarios. Cerrá y volvé a intentar.'); }); return () => controller.abort(); }, []);
+  const props = (name) => ({ value: values[name], disabled: busy, onChange: (event) => setValues({ ...values, [name]: event.target.value }) });
+  const field = (name, label, type = 'text') => <TextField key={name} id={`property-${name}`} label={label} type={type} step={type==='number'&&decimal.includes(name)?'0.01':undefined} min={type === 'number' ? 0 : undefined} {...props(name)} />;
   const submit = async (event) => {
-    event.preventDefault();
-    if (busy) return;
-    const price = values.price.trim().replace(',', '.');
-    if (!values.title.trim() || !values.address.trim()) { setError('Completá el nombre y la dirección de la propiedad.'); return; }
-    if (!/^\d{1,10}(\.\d{1,2})?$/.test(price)) { setError('Ingresá un precio válido, sin separadores de miles y con hasta dos decimales.'); return; }
+    event.preventDefault(); if (busy) return;
+    const body = { address: values.address.trim(), title: values.title.trim() || `${values.address.trim()}${values.unit ? ` · ${values.unit}` : ''}`, operation_type: values.operation_type, status: values.status, price: values.price === '' ? '0' : decimalInput(values.price) };
+    if (body.price === null) { setError('Ingresá un precio válido, sin separadores de miles.'); return; }
+    for (const key of optional.filter((v) => v !== 'title')) {
+      const raw = String(values[key]).trim();
+      if (numeric.includes(key)) body[key] = raw === '' ? null : Number(raw);
+      else if (decimal.includes(key)) { body[key] = raw === '' ? null : decimalInput(raw); if (raw && body[key] === null) { setError('Revisá superficies y porcentajes: hasta dos decimales.'); return; } }
+      else body[key] = raw || null;
+    }
+    body.utility_rules = utilityRules;
+    body.ownerships = owners.map((owner) => ({ person_id: Number(owner.person_id), ownership_percentage: decimalInput(owner.ownership_percentage, 3) }));
+    if (body.ownerships.some((owner) => !owner.person_id || owner.ownership_percentage === null)) { setError('Completá cada propietario y su porcentaje o quitá la fila.'); return; }
     setBusy(true); setError('');
-    const body = { ...values, title: values.title.trim(), address: values.address.trim(), price };
-    try {
-      const saved = editing ? await propertyApi.update(property.id, body) : await propertyApi.create(body);
-      onSaved(saved, editing);
-    } catch (failure) { setError(failure.message); }
-    finally { setBusy(false); }
+    try { const saved = property ? await propertyApi.update(property.id, body) : await propertyApi.create(body); onSaved(saved, Boolean(property)); }
+    catch (failure) { setError(failure.message); } finally { setBusy(false); }
   };
-  return <Dialog title={editing ? 'Editar propiedad' : 'Nueva propiedad'} busy={busy} onClose={onClose}><form onSubmit={submit} className="flex min-h-0 flex-1 flex-col"><div className="space-y-5 overflow-y-auto px-6 py-6"><div className="flex items-center gap-3 rounded-xl bg-slate-50 p-4"><span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-white text-brand shadow-xs"><Building2 size={21} /></span><p className="text-xs leading-5 text-muted">{editing ? 'Actualizá la información de tu cartera.' : 'Completá los datos para incorporar una propiedad a tu cartera.'}</p></div>{error && <Alert>{error}</Alert>}<Field id="property-title" label="Nombre de la propiedad"><input id="property-title" name="title" value={values.title} onChange={change} disabled={busy} required maxLength={120} placeholder="Nombre para identificar la propiedad" className={inputClasses} /></Field><Field id="property-address" label="Dirección"><input id="property-address" name="address" value={values.address} onChange={change} disabled={busy} required maxLength={200} autoComplete="street-address" placeholder="Calle, número y localidad" className={inputClasses} /></Field><div className="grid gap-5 sm:grid-cols-2"><Field id="property-operation" label="Tipo de operación"><select id="property-operation" name="operation_type" value={values.operation_type} onChange={change} disabled={busy} className={inputClasses}><option value="alquiler">Alquiler</option><option value="venta">Venta</option></select></Field><Field id="property-status" label="Estado"><select id="property-status" name="status" value={values.status} onChange={change} disabled={busy} className={inputClasses}>{Object.entries(PROPERTY_STATUSES).map(([value, status]) => <option key={value} value={value}>{status.label}</option>)}</select></Field></div><Field id="property-price" label="Precio (ARS)" hint="Ingresá el importe sin separadores de miles. Se admiten hasta dos decimales."><div className="relative"><span className="absolute inset-y-0 left-4 flex items-center text-sm text-muted">$</span><input id="property-price" name="price" value={values.price} onChange={change} disabled={busy} type="text" inputMode="decimal" required pattern="[0-9]{1,10}([.,][0-9]{1,2})?" placeholder="0,00" className={`${inputClasses} pl-8`} /></div></Field></div><div className="flex justify-end gap-3 border-t border-slate-100 bg-slate-50/50 px-6 py-5"><Button type="button" variant="secondary" onClick={onClose} disabled={busy}>Cancelar</Button><Button type="submit" disabled={busy}>{busy && <LoaderCircle size={16} className="motion-safe:animate-spin" />}{busy ? 'Guardando…' : editing ? 'Guardar cambios' : 'Crear propiedad'}</Button></div></form></Dialog>;
+  return <><FormShell title={property ? 'Editar propiedad' : 'Nueva propiedad'} size="lg" onSubmit={submit} onClose={onClose} busy={busy} error={error || peopleError} intro="Empezá por la dirección. Podés completar propietarios, características y servicios cuando los tengas." submitLabel={property ? 'Guardar cambios' : 'Crear propiedad'}>
+    <TextField id="property-address" label="Dirección *" required maxLength={200} {...props('address')} />
+    <div className="grid gap-5 sm:grid-cols-3"><Field id="property-type" label="Tipo"><select id="property-type" className={inputClasses} {...props('property_type')}><option value="">Sin especificar</option>{['Departamento','Casa','Local','Oficina','Cochera','Terreno','Galpón','Otro'].map((value) => <option key={value}>{value}</option>)}</select></Field>{field('floor','Piso')}{field('unit','Departamento / unidad')}</div>
+    <div className="grid gap-5 sm:grid-cols-2">{field('city','Localidad')}{field('province','Provincia')}<Field id="property-operation" label="Operación"><select id="property-operation" className={inputClasses} {...props('operation_type')}><option value="alquiler">Alquiler</option><option value="venta">Venta</option></select></Field><Field id="property-status" label="Estado"><select id="property-status" className={inputClasses} {...props('status')}>{Object.entries(PROPERTY_STATUSES).map(([value,status]) => <option key={value} value={value}>{status.label}</option>)}</select></Field></div>
+    <section className="rounded-xl border border-slate-200 p-4"><div className="mb-4 flex items-center justify-between gap-2"><h3 className="text-sm font-semibold">Propietarios <span className="font-normal text-muted">· opcional</span></h3><Button type="button" variant="ghost" disabled={busy || !people.length || !!peopleError} onClick={() => setOwners([...owners, {person_id:'',ownership_percentage:owners.length ? '' : '100'}])}>Agregar</Button></div><Button type="button" variant="ghost" disabled={busy} onClick={()=>setNewOwner(true)}>+ Crear propietario sin salir</Button>{!people.length && <p className="text-xs leading-5 text-muted">Primero cargá el contacto en Propietarios. Podés guardar la propiedad sin vincularlo todavía.</p>}{owners.map((owner,index) => <div key={index} className="mb-3 grid grid-cols-[1fr_90px_auto] gap-2"><select aria-label={`Propietario ${index+1}`} className={inputClasses} disabled={busy} value={owner.person_id} onChange={(event) => setOwners(owners.map((v,i) => i===index ? {...v,person_id:event.target.value} : v))}><option value="">Seleccionar…</option>{people.map((person) => <option key={person.id} value={person.id}>{personName(person)}</option>)}</select><input aria-label="Participación porcentual" inputMode="decimal" className={inputClasses} disabled={busy} placeholder="%" value={owner.ownership_percentage} onChange={(event) => setOwners(owners.map((v,i) => i===index ? {...v,ownership_percentage:event.target.value} : v))} /><Button type="button" variant="ghost" disabled={busy} onClick={() => setOwners(owners.filter((_,i) => i!==index))}>Quitar</Button></div>)}</section>
+    <details className="rounded-xl border border-slate-200 p-4"><summary className="cursor-pointer text-sm font-semibold">Características y referencia comercial <span className="font-normal text-muted">· opcional</span></summary><div className="mt-5 grid gap-5 sm:grid-cols-2">{field('title','Nombre para identificarla')}{field('internal_code','Carpeta / código interno')}{field('neighborhood','Barrio')}{field('postal_code','Código postal')}{field('registry_number','Matrícula')}{field('condition','Estado general')}{field('rooms','Ambientes','number')}{field('bedrooms','Dormitorios','number')}{field('bathrooms','Baños','number')}{field('total_area','Superficie total (m²)','number')}{field('covered_area','Superficie cubierta (m²)','number')}{field('price','Precio de referencia (ARS)')}{field('agency_ownership_percentage','Participación propia de la inmobiliaria (%)')}</div><p className="mt-3 text-xs leading-5 text-muted">La participación propia se usa para separar ingresos propios de honorarios por administrar inmuebles de terceros.</p></details>
+    <UtilityRulesEditor value={utilityRules} onChange={setUtilityRules} disabled={busy} id="property-services"/>
+    <p className="text-xs leading-5 text-muted">Son instrucciones de referencia. Al crear o editar el contrato, copiá y confirmá las condiciones acordadas; cada contrato conserva su configuración.</p>
+    <Field id="property-notes" label="Observaciones"><textarea id="property-notes" rows={3} className={inputClasses} {...props('notes')} /></Field>
+  </FormShell>{newOwner&&<PersonForm mode="owners" onClose={()=>setNewOwner(false)} onSaved={(person)=>{setPeople([...people,person]);setOwners([...owners,{person_id:person.id,ownership_percentage:owners.length?'':'100'}]);setNewOwner(false);}}/>}</>;
 }
