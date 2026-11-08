@@ -8,6 +8,10 @@ class RentAdjustment(db.Model):
         db.CheckConstraint("adjustment_percentage IS NULL OR adjustment_percentage >= 0", name="ck_adjustment_percentage"),
     )
 
+    index_name = db.Column(db.String(50), nullable=True)
+    calculation_detail = db.Column(db.Text, nullable=True)
+    source_url = db.Column(db.String(500), nullable=True)
+
     id = db.Column(db.Integer, primary_key=True)
     contract_id = db.Column(
         db.Integer, db.ForeignKey("rental_contracts.id"), nullable=False

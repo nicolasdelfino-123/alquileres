@@ -8,8 +8,8 @@ from sqlalchemy.exc import IntegrityError
 from app.extensions import db
 from app.models import (Person, Property, PropertyOwner, RentalContract, RentAdjustment,
                         RentCharge, RentPayment, OwnerSettlement, OwnerTransfer,
-                        Expense, Document, Reminder, RentalContractTenant, SaleOperation)
-from app.models.common import ZERO, utcnow
+                        Expense, Document, Reminder, RentalContractTenant, SaleOperation, ContractGuarantor)
+from app.models.common import business_today, ZERO, utcnow
 from app.repositories.management_repository import ManagementRepository as Repository
 
 
@@ -51,7 +51,7 @@ DEFAULTS = {
     RentCharge: {"other_charges": ZERO, "discounts": ZERO, "status": "pending"},
     OwnerSettlement: {"deductions": ZERO, "currency": "ARS", "status": "pending"},
 }
-READONLY = {"id", "created_at", "uploaded_at", "completed_at", "cancelled_at", "cancellation_reason"}
+READONLY = {"id", "created_at", "uploaded_at", "completed_at", "cancelled_at", "cancellation_reason", "confirmed_at", "source_key"}
 ENUMS = {
     (Property, "operation_type"): {"alquiler", "venta"},
     (Property, "status"): {"available", "rented", "sold", "inactive"},
@@ -61,7 +61,7 @@ ENUMS = {
     (Expense, "responsible_party"): {"owner", "tenant", "agency"},
 }
 FOREIGN_MODELS = {"properties": Property, "persons": Person, "rental_contracts": RentalContract,
-                  "rent_charges": RentCharge, "owner_settlements": OwnerSettlement}
+                  "rent_charges": RentCharge, "owner_settlements": OwnerSettlement, "rent_payments": RentPayment, "owner_transfers": OwnerTransfer}
 
 
 def money(value):
@@ -81,6 +81,9 @@ def serialize(record):
         result[column.name] = value
     if isinstance(record, RentalContract):
         result["tenant_ids"] = record.tenant_ids
+        result["guarantor_ids"] = record.guarantor_ids
+    if isinstance(record, Property):
+        result["ownerships"] = [{"person_id": link.person_id, "ownership_percentage": str(link.ownership_percentage)} for link in record.owners]
     if isinstance(record, RentCharge):
         result.update(paid_amount=str(record.paid_amount), outstanding_balance=str(record.outstanding_balance), status=record.calculated_status)
     if isinstance(record, OwnerSettlement):
@@ -100,6 +103,9 @@ def convert(column, value):
         if not column.nullable:
             raise APIError(f"{column.name} es obligatorio")
         return None
+    if column.name == "utility_rules":
+        from app.services.utility_service import validate_rules
+        return validate_rules(value)
     kind = column.type.python_type
     try:
         if kind is Decimal:
@@ -165,7 +171,25 @@ def validate(record, creating=False, check_overlap=True):
         currency = record.currency
         if not currency or len(currency) != 3 or not currency.isascii() or not currency.isalpha() or currency != currency.upper():
             raise APIError("currency debe ser un código de tres letras mayúsculas")
+    if isinstance(record, Property):
+        for field in ("rooms", "bedrooms", "bathrooms", "total_area", "covered_area"):
+            if getattr(record, field) is not None and getattr(record, field) < 0:
+                raise APIError(f"{field} no puede ser negativo")
+        if record.agency_ownership_percentage is not None and not 0 <= record.agency_ownership_percentage <= 100:
+            raise APIError("La participación propia debe estar entre 0 y 100")
+    if isinstance(record, Person) and record.cbu:
+        import re
+        if not re.fullmatch(r"\d{22}",record.cbu):
+            raise APIError("El CBU debe tener 22 dígitos, sin espacios")
     if isinstance(record, RentalContract):
+        if record.collection_cbu:
+            import re
+            if not re.fullmatch(r"\d{22}",record.collection_cbu):
+                raise APIError("El CBU de cobro debe tener 22 dígitos, sin espacios")
+        if record.payment_day is not None and not 1 <= record.payment_day <= 31:
+            raise APIError("El día de pago debe estar entre 1 y 31")
+        if record.next_adjustment_date and not record.start_date <= record.next_adjustment_date <= record.end_date:
+            raise APIError("El próximo ajuste debe estar dentro del contrato")
         if record.end_date <= record.start_date:
             raise APIError("end_date debe ser posterior a start_date")
         if record.administration_percentage is not None and record.administration_percentage > 100:
@@ -190,11 +214,15 @@ def validate(record, creating=False, check_overlap=True):
         from app.services.contract_service import ContractService
         ContractService.validate_link(record)
     if isinstance(record, SaleOperation):
-        if record.buyer_id == record.seller_id:
+        if not record.property_id and not record.operation_description:
+            raise APIError("Indicá una propiedad o una descripción de la operación")
+        if (record.personal_commission or ZERO) + (record.agency_commission or ZERO) > record.commission:
+            raise APIError("Las comisiones distribuidas no pueden superar la comisión total")
+        if record.buyer_id is not None and record.buyer_id == record.seller_id:
             raise APIError("El comprador y el vendedor deben ser personas distintas")
         if record.commission > record.price:
             raise APIError("La comisión no puede superar el precio de venta")
-        if record.status == "completed" and record.sale_date > date.today():
+        if record.status == "completed" and record.sale_date > business_today():
             raise APIError("Una compraventa completada no puede tener fecha futura")
     if isinstance(record, RentAdjustment):
         contract = get_record(RentalContract, record.contract_id)
@@ -204,7 +232,31 @@ def validate(record, creating=False, check_overlap=True):
         contract = get_record(RentalContract, record.contract_id)
         if contract.property_id != record.property_id:
             raise APIError("El contrato no corresponde a la propiedad")
+    if isinstance(record, Document):
+        if (record.period_year is None) != (record.period_month is None):
+            raise APIError("Indicá año y mes del comprobante")
+        if record.period_year is not None and (not 1 <= record.period_year <= 9999 or not 1 <= record.period_month <= 12):
+            raise APIError("Período del comprobante inválido")
+        for field, related_model in (("charge_id", RentCharge), ("payment_id", RentPayment), ("settlement_id", OwnerSettlement), ("transfer_id", OwnerTransfer)):
+            identifier = getattr(record, field)
+            if identifier:
+                related = get_record(related_model, identifier)
+                related_contract = related.contract_id if hasattr(related, "contract_id") else None
+                if record.contract_id and related_contract and record.contract_id != related_contract:
+                    raise APIError("El comprobante no corresponde al contrato indicado")
+                related_property = related.property_id if hasattr(related, "property_id") else related.settlement.property_id if isinstance(related, OwnerTransfer) else related.contract.property_id
+                if record.property_id and record.property_id != related_property:
+                    raise APIError("El comprobante no corresponde a la propiedad indicada")
+        import re
+        if not (re.fullmatch(r'[a-f0-9]{32}\.(pdf|png|jpg)', record.file_path) or record.file_path.startswith('https://')):
+            raise APIError("Adjuntá un archivo o ingresá un enlace HTTPS válido")
     if isinstance(record, Reminder):
+        if record.responsible_person_id:
+            get_record(Person, record.responsible_person_id)
+        if record.priority and record.priority not in {"normal", "urgent"}:
+            raise APIError("Prioridad inválida")
+        if record.progress and record.progress not in {"pending", "in_progress", "recurring"}:
+            raise APIError("Seguimiento inválido")
         record.completed_at = (record.completed_at or utcnow()) if record.status == "completed" else None
 
 
@@ -222,12 +274,81 @@ def filters_for(model, arguments):
 def lock_parent_properties(record, values):
     # Same lock order as payments: property, contract, dependent record.
     if isinstance(record, (RentalContract, PropertyOwner, SaleOperation)):
-        for identifier in sorted({record.property_id, values.get("property_id", record.property_id)}):
+        for identifier in sorted(v for v in {record.property_id, values.get("property_id", record.property_id)} if v is not None):
             get_record(Property, identifier, lock=True)
     elif isinstance(record, RentalContractTenant):
         contract = get_record(RentalContract, record.contract_id)
         get_record(Property, contract.property_id, lock=True)
         get_record(RentalContract, contract.id, lock=True)
+
+
+def extract_guarantors(data):
+    if not isinstance(data, dict):
+        raise APIError("Se requiere un objeto JSON")
+    values = dict(data)
+    identifiers = values.pop("guarantor_ids", None)
+    if identifiers is not None:
+        if not isinstance(identifiers, list) or len(identifiers) > 20:
+            raise APIError("La lista de garantes no es válida")
+        identifiers = [convert(Person.__table__.c.id, value) for value in identifiers]
+        if any(value is None or value <= 0 for value in identifiers) or len(set(identifiers)) != len(identifiers):
+            raise APIError("Garantes inválidos o duplicados")
+        for identifier in identifiers:
+            get_record(Person, identifier)
+    return values, identifiers
+
+
+def sync_guarantors(contract, identifiers):
+    if identifiers is None:
+        return
+    if set(identifiers) & set(contract.tenant_ids):
+        raise APIError("Un inquilino no puede ser garante del mismo contrato")
+    if contract.charges and set(identifiers) != set(contract.guarantor_ids):
+        raise APIError("Con mensualidades registradas se conserva la garantía del contrato", 409)
+    existing = {link.person_id: link for link in contract.guarantor_links}
+    for identifier, link in existing.items():
+        if identifier not in identifiers:
+            db.session.delete(link)
+    for identifier in set(identifiers) - existing.keys():
+        db.session.add(ContractGuarantor(contract=contract, person_id=identifier))
+    db.session.flush()
+    db.session.expire(contract, ["guarantor_links"])
+
+
+def extract_ownerships(data):
+    if not isinstance(data, dict):
+        raise APIError("Se requiere un objeto JSON")
+    values = dict(data)
+    owners = values.pop("ownerships", None)
+    if owners is not None:
+        if not isinstance(owners, list) or len(owners) > 30:
+            raise APIError("Lista de propietarios inválida")
+        seen, total = set(), ZERO
+        for owner in owners:
+            if not isinstance(owner, dict) or set(owner) != {"person_id", "ownership_percentage"}:
+                raise APIError("Completá persona y porcentaje para cada propietario")
+            identifier = convert(Person.__table__.c.id, owner["person_id"])
+            percentage = convert(PropertyOwner.__table__.c.ownership_percentage, owner["ownership_percentage"])
+            if not identifier or identifier in seen or percentage is None or percentage <= 0:
+                raise APIError("Propietario duplicado o participación inválida")
+            get_record(Person, identifier)
+            seen.add(identifier)
+            total += percentage
+        if total > 100:
+            raise APIError("La suma de participaciones no puede superar el 100%")
+    return values, owners
+
+
+def sync_ownerships(record, owners):
+    if owners is None:
+        return
+    for link in list(record.owners):
+        db.session.delete(link)
+    db.session.flush()
+    for owner in owners:
+        db.session.add(PropertyOwner(property_id=record.id, person_id=int(owner["person_id"]), ownership_percentage=Decimal(str(owner["ownership_percentage"]))))
+    db.session.flush()
+    db.session.expire(record, ["owners"])
 
 
 class ManagementService:
@@ -249,16 +370,26 @@ class ManagementService:
         model = RESOURCES[resource]
         if model in FINANCIAL:
             return FinanceService.create(resource, data)
+        ownerships = None
+        if model is Property:
+            data, ownerships = extract_ownerships(data)
+            data = {"price": "0", "operation_type": "alquiler", **data}
+            data.setdefault("title", data.get("address"))
         tenant_ids = None
+        guarantor_ids = None
         if model is RentalContract:
             from app.services.contract_service import ContractService
+            data, guarantor_ids = extract_guarantors(data)
             data, tenant_ids = ContractService.extract_tenants(data)
         values = {**DEFAULTS.get(model, {}), **payload(model, data)}
         record = model(**values)
         validate(record, creating=True)
         Repository.add(record)
+        if model is Property:
+            sync_ownerships(record, ownerships)
         if model is RentalContract:
             ContractService.sync_tenants(record, tenant_ids)
+            sync_guarantors(record, guarantor_ids)
         return record
 
     @staticmethod
@@ -270,6 +401,8 @@ class ManagementService:
         if model is RentalContractTenant:
             raise APIError("Para cambiar una asociación, elimínela y agregue la nueva", 409)
         record = get_record(model, identifier)
+        data, ownerships = extract_ownerships(data) if model is Property else (data, None)
+        data, guarantor_ids = extract_guarantors(data) if model is RentalContract else (data, None)
         original_data = data
         tenant_ids = None
         if model is RentalContract:
@@ -294,8 +427,11 @@ class ManagementService:
         with db.session.no_autoflush:
             validate(record, check_overlap=check_overlap)
         db.session.flush()
+        if model is Property:
+            sync_ownerships(record, ownerships)
         if model is RentalContract:
             ContractService.sync_tenants(record, tenant_ids)
+            sync_guarantors(record, guarantor_ids)
         return record
 
     @staticmethod
@@ -312,7 +448,7 @@ class ManagementService:
             if record.person_id == contract.tenant_id or contract.charges:
                 raise APIError("No se puede eliminar el inquilino principal o cambiar inquilinos con mensualidades", 409)
         for relationship in inspect(model).relationships:
-            if model is RentalContract and relationship.key == "tenant_links":
+            if model is RentalContract and relationship.key in {"tenant_links", "guarantor_links"}:
                 continue
             if relationship.uselist and getattr(record, relationship.key):
                 raise APIError("El registro tiene operaciones relacionadas y no puede borrarse", 409)
@@ -403,7 +539,7 @@ class FinanceService:
             raise APIError("La mensualidad está anulada", 409)
         if record.amount <= 0 or record.amount > charge.outstanding_balance:
             raise APIError("El pago debe ser positivo y no superar el saldo pendiente", 409)
-        if record.payment_date > date.today() or record.payment_date < charge.contract.start_date:
+        if record.payment_date > business_today() or record.payment_date < charge.contract.start_date:
             raise APIError("La fecha del pago debe estar entre el inicio del contrato y hoy")
         Repository.add(record)
         db.session.expire(charge, ["payments"])
@@ -448,13 +584,13 @@ class FinanceService:
         if record.gross_amount <= 0 or record.gross_amount > available:
             raise APIError("La liquidación supera lo cobrado disponible para el propietario", 409)
         if record.administration_fee is None:
-            fees = sum((receipts[c.id] * c.administration_percentage / Decimal("100") for c in charges), ZERO)
+            fees = sum((receipts[c.id] * min(c.rent_amount, c.total_amount) / c.total_amount * c.administration_percentage / Decimal("100") if c.total_amount else ZERO for c in charges), ZERO)
             record.administration_fee = money(record.gross_amount * fees / collected)
         record.net_amount = record.gross_amount - record.administration_fee - record.deductions
         if record.net_amount < 0:
             raise APIError("Honorarios y deducciones superan el importe bruto")
         validate(record)
-        if record.settlement_date > date.today():
+        if record.settlement_date > business_today():
             raise APIError("No se pueden registrar liquidaciones futuras")
         Repository.add(record)
         record.status = record.calculated_status
@@ -475,7 +611,7 @@ class FinanceService:
             raise APIError("La liquidación está anulada", 409)
         if record.amount <= 0 or record.amount > settlement.outstanding_balance:
             raise APIError("La transferencia debe ser positiva y no superar el saldo", 409)
-        if record.transfer_date < settlement.settlement_date or record.transfer_date > date.today():
+        if record.transfer_date < settlement.settlement_date or record.transfer_date > business_today():
             raise APIError("Fecha de transferencia inválida")
         Repository.add(record)
         db.session.expire(settlement, ["transfers"])

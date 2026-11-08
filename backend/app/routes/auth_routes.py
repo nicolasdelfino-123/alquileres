@@ -14,16 +14,27 @@ auth_bp.add_url_rule("/auth/me", "me", AuthController.me, methods=["GET"])
 def init_auth(app):
     app.register_blueprint(auth_bp, url_prefix="/api")
 
+    from app.services.email_auth_service import EmailAuthService
+    from app.controllers.management_controller import json_body
+
+    for action in ("register", "forgot-password", "resend-verification", "verify-email", "reset-password"):
+        def handler(action=action):
+            return EmailAuthService.handle(action, json_body())
+        app.add_url_rule("/api/auth/" + action, "public_auth_" + action, handler, methods=["POST"])
+
     @app.before_request
     def protect_api():
-        if not request.path.startswith("/api/") or request.method == "OPTIONS" or request.endpoint == "auth.login":
+        if not request.path.startswith("/api/") or request.method == "OPTIONS" or request.endpoint == "auth.login" or (request.endpoint or "").startswith("public_auth_"):
             return None
         authorization = request.headers.get("Authorization", "").split()
         if len(authorization) != 2 or authorization[0].lower() != "bearer":
             raise APIError("Se requiere Authorization: Bearer <token>", 401)
         user = AuthService.authenticate(authorization[1])
         g.current_user = user
-        admin_required = request.method == "DELETE" or request.path.rstrip("/").endswith("/cancel")
+        if user.role != "admin" and request.path != "/api/auth/me":
+            if request.method != "GET" or not (request.path == "/api/properties" or request.path.startswith("/api/properties/")):
+                raise APIError("Esta sección está disponible solo para el administrador", 403)
+        admin_required = request.path.startswith("/api/settings/") or request.method == "DELETE" or request.path.rstrip("/").endswith("/cancel")
         if admin_required and user.role != "admin":
             raise APIError("Esta operación requiere rol admin", 403)
 

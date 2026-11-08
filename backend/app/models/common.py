@@ -1,11 +1,16 @@
 from datetime import datetime, timezone
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from app.extensions import db
 
 
 def utcnow():
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def business_today():
+    return datetime.now(ZoneInfo("America/Argentina/Cordoba")).date()
 
 
 class CancellationMixin:

@@ -5,6 +5,7 @@ from app.models.common import CancellationMixin
 class RentPayment(CancellationMixin, db.Model):
     __tablename__ = "rent_payments"
     __table_args__ = (
+        db.Index('ix_payments_date','payment_date'),
         db.CheckConstraint("amount > 0", name="ck_payment_positive"),
         db.UniqueConstraint("reference", name="uq_payment_reference"),
         db.UniqueConstraint("idempotency_key", name="uq_payment_idempotency"),

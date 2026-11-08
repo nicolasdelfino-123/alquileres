@@ -6,6 +6,7 @@ from app.models.common import CancellationMixin, ZERO
 class OwnerSettlement(CancellationMixin, db.Model):
     __tablename__ = "owner_settlements"
     __table_args__ = (
+        db.Index('ix_settlements_period_currency','period_year','period_month','currency'),
         db.CheckConstraint("period_month BETWEEN 1 AND 12 AND period_year BETWEEN 1 AND 9999", name="ck_settlement_period"),
         db.CheckConstraint("gross_amount >= 0 AND administration_fee >= 0 AND deductions >= 0 AND net_amount >= 0", name="ck_settlement_amounts"),
         db.CheckConstraint("net_amount = gross_amount - administration_fee - deductions", name="ck_settlement_net"),

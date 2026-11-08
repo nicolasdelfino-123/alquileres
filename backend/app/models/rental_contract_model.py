@@ -5,6 +5,7 @@ from app.extensions import db
 
 
 class RentalContract(db.Model):
+    utility_rules = db.Column(db.JSON, nullable=True)
     __tablename__ = "rental_contracts"
     __table_args__ = (
         db.CheckConstraint("initial_rent >= 0 AND current_rent >= 0", name="ck_contract_rents"),
@@ -14,6 +15,15 @@ class RentalContract(db.Model):
             "end_date > start_date", name="ck_rental_contracts_dates"
         ),
     )
+
+    collection_alias = db.Column(db.String(100), nullable=True)
+    collection_cbu = db.Column(db.String(22), nullable=True)
+    payment_day = db.Column(db.Integer, nullable=True)
+    payment_method = db.Column(db.String(50), nullable=True)
+    deposit_amount = db.Column(db.Numeric(12, 2), nullable=True)
+    signed_date = db.Column(db.Date, nullable=True)
+    next_adjustment_date = db.Column(db.Date, nullable=True)
+    fixed_adjustment_percentage = db.Column(db.Numeric(8, 4), nullable=True)
 
     id = db.Column(db.Integer, primary_key=True)
     property_id = db.Column(db.Integer, db.ForeignKey("properties.id"), nullable=False)
@@ -49,3 +59,11 @@ class RentalContract(db.Model):
     def tenant_ids(self):
         # The original principal tenant remains valid without backfilling old rows.
         return sorted({self.tenant_id} | {link.person_id for link in self.tenant_links})
+
+    guarantor_links = db.relationship("ContractGuarantor", back_populates="contract", cascade="all, delete-orphan")
+
+    @computed_property
+    def guarantor_ids(self):
+        return sorted(link.person_id for link in self.guarantor_links)
+
+    communications = db.relationship("Communication", back_populates="contract")

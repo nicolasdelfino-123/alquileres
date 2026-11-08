@@ -40,7 +40,7 @@ class AuthService:
         lifetime = current_app.config["JWT_ACCESS_TOKEN_MINUTES"]
         token = jwt.encode({"sub": str(user.id), "iat": now, "nbf": now,
                             "exp": now + timedelta(minutes=lifetime), "jti": uuid4().hex,
-                            "iss": "alquileres-backend", "aud": "alquileres-api", "type": "access", "role": user.role},
+                            "iss": "alquileres-backend", "aud": "alquileres-api", "type": "access", "role": user.role, "version": user.auth_version},
                            secret, algorithm="HS256")
         return {"access_token": token, "token_type": "Bearer", "expires_in": lifetime * 60,
                 "user": {"id": user.id, "username": user.username, "role": user.role}}
@@ -56,7 +56,7 @@ class AuthService:
             user = AuthRepository.by_id(int(claims["sub"]))
         except (jwt.InvalidTokenError, ValueError, TypeError):
             raise APIError("Token inválido o vencido", 401) from None
-        if user is None or not user.is_active or user.role not in {"admin", "operator"}:
+        if user is None or not user.is_active or user.role not in {"admin", "operator"} or claims.get("version") != user.auth_version:
             raise APIError("Usuario no autorizado", 401)
         return user
 

@@ -5,6 +5,14 @@ from app.models.common import utcnow
 class Reminder(db.Model):
     __tablename__ = "reminders"
     __table_args__ = (db.CheckConstraint("status IN ('pending', 'completed', 'cancelled')", name="ck_reminder_status"),)
+    source_key = db.Column(db.String(150), nullable=True, unique=True)
+    category = db.Column(db.String(50), nullable=True)
+    priority = db.Column(db.String(20), nullable=True)
+    progress = db.Column(db.String(30), nullable=True)
+    amount = db.Column(db.Numeric(12, 2), nullable=True)
+    responsible_person_id = db.Column(db.Integer, db.ForeignKey("persons.id", name="fk_reminder_responsible"), nullable=True)
+    next_action = db.Column(db.Text, nullable=True)
+
     id = db.Column(db.Integer, primary_key=True)
     contract_id = db.Column(db.Integer, db.ForeignKey("rental_contracts.id"), index=True)
     property_id = db.Column(db.Integer, db.ForeignKey("properties.id"), index=True)

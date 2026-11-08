@@ -1,11 +1,12 @@
 from datetime import date
 from app.extensions import db
-from app.models.common import CancellationMixin, ZERO
+from app.models.common import business_today, CancellationMixin, ZERO
 
 
 class RentCharge(CancellationMixin, db.Model):
     __tablename__ = "rent_charges"
     __table_args__ = (
+        db.Index('ix_charges_period_currency','period_year','period_month','currency'),
         db.UniqueConstraint("id", "contract_id", name="uq_charge_id_contract"),
         db.UniqueConstraint("contract_id", "period_year", "period_month", name="uq_charge_contract_period"),
         db.CheckConstraint("period_month BETWEEN 1 AND 12 AND period_year BETWEEN 1 AND 9999", name="ck_charge_period"),
@@ -46,4 +47,4 @@ class RentCharge(CancellationMixin, db.Model):
             return "paid"
         if self.paid_amount > 0:
             return "partial"
-        return "overdue" if self.due_date < date.today() else "pending"
+        return "overdue" if self.due_date < business_today() else "pending"

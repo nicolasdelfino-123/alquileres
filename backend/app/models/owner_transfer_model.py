@@ -9,6 +9,8 @@ class OwnerTransfer(CancellationMixin, db.Model):
         db.UniqueConstraint("reference", name="uq_transfer_reference"),
         db.UniqueConstraint("idempotency_key", name="uq_transfer_idempotency"),
     )
+    confirmed_at = db.Column(db.DateTime, nullable=True)
+
     id = db.Column(db.Integer, primary_key=True)
     settlement_id = db.Column(db.Integer, db.ForeignKey("owner_settlements.id"), nullable=False, index=True)
     transfer_date = db.Column(db.Date, nullable=False)

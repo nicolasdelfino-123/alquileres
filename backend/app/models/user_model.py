@@ -13,6 +13,8 @@ class User(db.Model):
     password_hash = db.Column(db.String(255), nullable=False)
     role = db.Column(db.String(30), nullable=False, default="operator")
     is_active = db.Column(db.Boolean, nullable=False, default=True)
+    email_pending = db.Column(db.Boolean, nullable=False, default=False, server_default=db.false())
+    auth_version = db.Column(db.Integer, nullable=False, default=0, server_default="0")
     created_at = db.Column(db.DateTime, nullable=False, default=utcnow)
 
     @validates("password_hash")

@@ -22,7 +22,7 @@ class RentalManagementTest(unittest.TestCase):
         parsed = make_url(database_url)
         if parsed.get_backend_name() != 'sqlite' and not (parsed.database or '').startswith('codex_rental_test'):
             raise RuntimeError('Las pruebas solo permiten una base PostgreSQL descartable codex_rental_test*')
-        self.app = create_app({'TESTING': True, 'SQLALCHEMY_DATABASE_URI': database_url,
+        self.app = create_app({'TESTING': True, 'AUTH_RATE_LIMIT_ENABLED': False, 'SQLALCHEMY_DATABASE_URI': database_url,
                                'JWT_SECRET_KEY': 'synthetic-test-key-not-for-production-12345'})
         self.context = self.app.app_context()
         self.context.push()
@@ -279,7 +279,7 @@ class RentalManagementTest(unittest.TestCase):
         self.assertIsNotNone(response.get_json()['completed_at'])
         self.assertEqual(self.client.delete(f"/api/reminders/{reminder['id']}").status_code, 200)
         document = self.post('documents', {'person_id': self.tenant['id'], 'document_type': 'contract',
-            'file_path': 'test/contract.pdf', 'original_filename': 'contract.pdf'})
+            'file_path': 'https://example.invalid/contract.pdf', 'original_filename': 'contract.pdf'})
         self.assertIsNotNone(document['uploaded_at'])
         self.assertEqual(self.client.delete(f"/api/documents/{document['id']}").status_code, 200)
 

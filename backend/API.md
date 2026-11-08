@@ -4,7 +4,7 @@ Base: `/api`. Fechas `YYYY-MM-DD`, fechas de auditoría UTC, dinero y porcentaje
 como cadenas decimales en las respuestas (incluido `price` de propiedades).
 Los números JSON se leen directamente como Decimal. Se rechazan negativos,
 valores no finitos, importes con más de dos decimales y campos desconocidos.
-JWT obligatorio mediante Authorization: Bearer; POST `/auth/login` es público.
+JWT obligatorio mediante Authorization: Bearer; Los endpoints de login, registro y recuperación son públicos; el registro exige el código del equipo.
 
 ## Recursos y rutas
 
@@ -30,7 +30,7 @@ Estados de contrato: `active`, `expired`, `terminated`, `cancelled`.
 Recordatorios: `pending`, `completed`, `cancelled`; `completed_at` es automático.
 Gastos: `responsible_party` = `owner`, `tenant`, `agency`.
 Documentos: CRUD de metadatos y ruta del archivo; no carga, descarga ni eliminación
-física de archivos. Usuarios internos creados por CLI, sin registro público.
+física de archivos. Usuarios creados por CLI o desde la web con código de registro y verificación por correo.
 
 ## Operaciones financieras
 
@@ -122,3 +122,19 @@ Contratos aceptan `tenant_ids`, conservando `tenant_id` como principal; GET/POST
 Las deudas del contrato son compartidas por todos sus inquilinos, sin duplicarlas en el dashboard.
 `/sales`: CRUD con `property_id`, `buyer_id`, `seller_id`, `price`, `currency`, `sale_date`,
 `commission` (importe monetario) y `status` (`pending`, `completed`, `cancelled`).
+
+## Gestión operativa ampliada
+
+- `GET /workspace?year=2026&month=11&currency=ARS`: ficha de trabajo mensual con contratos, personas, propietarios, cobros, liquidaciones, transferencias, documentos y totales. Requiere administrador en el esquema actual.
+- `POST /charges/generate`: `year`, `month`, `currency`, `contract_ids` opcional. Genera mensualidades faltantes sin duplicar períodos.
+- `POST /charges/{id}/correct`: importes, vencimiento, notas y `reason`. Solo antes de movimientos, con revisión auditada.
+- `POST /contracts/{id}/apply-adjustment`: `effective_date`, `mode` (`IPC`, `ICL`, `percentage`, `amount`) y valores correspondientes. Conserva el cálculo y no reescribe mensualidades existentes.
+- `GET /contracts/{id}/adjustments`: historial.
+- `POST /settlements/generate-owner`: `owner_id`, período, moneda e `idempotency_key` de hasta 50 caracteres. Liquida cobros disponibles sin deducciones adicionales.
+- `POST /transfers/{id}/confirm`: registra la confirmación administrativa de recepción.
+- `POST /files`: multipart con archivo y metadatos de vínculo; PDF/JPG/PNG hasta 10 MB. `GET /files/{id}` descarga autenticada.
+- `GET /reports/business?year=2026&currency=ARS`: resumen anual por fecha de cobro y gastos del negocio.
+- `GET|POST /contracts/{id}/messages`: consultar o programar un aviso por correo. POST: `person_id`, `message`, `scheduled_at` ISO con zona horaria. Solo personas del contrato o propietarios del inmueble. `POST /messages/{id}/cancel` cancela un pendiente.
+- `GET /archive`: hojas del Excel privado. `GET /archive/sheet?name=JUNIO`: consulta. `POST /archive`: reemplazar copia de consulta mediante XLSX multipart, sin importar operaciones contables.
+
+Propiedades aceptan `ownerships` (`person_id`, `ownership_percentage`) y datos opcionales de ubicación, características y servicios. Contratos aceptan `guarantor_ids`, día de pago, depósito, firma, próximo aumento y cuenta de cobro. Los campos bancarios de cobro del contrato son independientes de los del propietario.

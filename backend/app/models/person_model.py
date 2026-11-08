@@ -6,6 +6,12 @@ from app.extensions import db
 class Person(db.Model):
     __tablename__ = "persons"
 
+    occupation = db.Column(db.String(150), nullable=True)
+    employer = db.Column(db.String(150), nullable=True)
+    work_phone = db.Column(db.String(30), nullable=True)
+    bank_name = db.Column(db.String(100), nullable=True)
+    bank_holder = db.Column(db.String(150), nullable=True)
+
     id = db.Column(db.Integer, primary_key=True)
     first_name = db.Column(db.String(100), nullable=False)
     last_name = db.Column(db.String(100), nullable=False)
@@ -22,6 +28,7 @@ class Person(db.Model):
         default=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
     )
 
+    guarantees = db.relationship("ContractGuarantor", back_populates="person")
     property_ownerships = db.relationship("PropertyOwner", back_populates="person")
     rental_contracts = db.relationship("RentalContract", back_populates="tenant")
 
@@ -47,3 +54,5 @@ class Person(db.Model):
             "notes": self.notes,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+
+    communications = db.relationship("Communication", back_populates="person")

@@ -2,10 +2,11 @@ import calendar
 from datetime import date, timedelta
 from decimal import Decimal
 from sqlalchemy import or_, select
+from sqlalchemy.orm import selectinload
 
 from app.extensions import db
-from app.models import RentalContract, RentAdjustment, RentCharge, RentPayment, OwnerSettlement, Expense, Person, RentalContractTenant
-from app.models.common import ZERO
+from app.models import RentalContract, RentAdjustment, RentCharge, RentPayment, OwnerSettlement, Expense, Person, Property, RentalContractTenant
+from app.models.common import business_today, ZERO
 from app.services.management_service import APIError, get_record, serialize
 
 
@@ -54,7 +55,7 @@ class ReportService:
                 RentalContract.tenant_links.any(RentalContractTenant.person_id == identifier)),
             RentCharge.cancelled_at.is_(None))))
         pending = [charge for charge in charges if charge.outstanding_balance > 0]
-        overdue = [charge for charge in pending if charge.due_date < date.today()]
+        overdue = [charge for charge in pending if charge.due_date < business_today()]
         return {"tenant_id": identifier, "balances_by_currency": balances_by_currency(pending),
                 "overdue_by_currency": balances_by_currency(overdue), "charges": [serialize(c) for c in pending]}
 
@@ -68,28 +69,81 @@ class ReportService:
     @staticmethod
     def dashboard(arguments):
         year, month, currency = period_arguments(arguments)
+        detail = arguments.get('detail')
+        if detail and detail not in {'collections', 'pending', 'administration_fees', 'expenses'}:
+            raise APIError('Indicador inválido')
         start = date(year, month, 1)
         end = add_months(start, 1)
         payments = list(db.session.scalars(select(RentPayment).join(RentCharge, RentPayment.charge_id == RentCharge.id).where(
             RentPayment.payment_date >= start, RentPayment.payment_date < end,
             RentPayment.cancelled_at.is_(None), RentCharge.currency == currency)))
-        charges = list(db.session.scalars(select(RentCharge).where(RentCharge.period_year == year,
+        charges = list(db.session.scalars(select(RentCharge).options(selectinload(RentCharge.payments)).where(RentCharge.period_year == year,
             RentCharge.period_month == month, RentCharge.currency == currency, RentCharge.cancelled_at.is_(None))))
-        settlements = list(db.session.scalars(select(OwnerSettlement).where(OwnerSettlement.period_year == year,
+        settlements = list(db.session.scalars(select(OwnerSettlement).options(selectinload(OwnerSettlement.transfers)).where(OwnerSettlement.period_year == year,
             OwnerSettlement.period_month == month, OwnerSettlement.currency == currency, OwnerSettlement.cancelled_at.is_(None))))
         expenses = list(db.session.scalars(select(Expense).where(Expense.expense_date >= start,
             Expense.expense_date < end, Expense.currency == currency)))
-        return {"year": year, "month": month, "currency": currency,
+        result = {"year": year, "month": month, "currency": currency,
                 "collections": str(sum((p.amount for p in payments), ZERO)),
                 "pending": str(sum((c.outstanding_balance for c in charges), ZERO)),
                 "administration_fees": str(sum((s.administration_fee for s in settlements), ZERO)),
                 "expenses": str(sum((e.amount for e in expenses), ZERO)),
                 "pending_owner_transfers": str(sum((s.outstanding_balance for s in settlements), ZERO))}
+        if detail:
+            records = {'collections': payments, 'pending': charges,
+                       'administration_fees': settlements, 'expenses': expenses}[detail]
+            if detail == 'pending':
+                records = [r for r in records if r.outstanding_balance > ZERO]
+            contract_ids = {r.contract_id for r in records if hasattr(r, 'contract_id') and r.contract_id}
+            if detail == 'administration_fees':
+                contract_ids.update(c.contract_id for c in charges)
+            contracts = {r.id: r for r in db.session.scalars(select(RentalContract).where(RentalContract.id.in_(contract_ids)))} if contract_ids else {}
+            settlement_contracts = {}
+            if detail == 'administration_fees':
+                # Use the contracts charged in this settlement period, including
+                # historical contracts; never guess from the currently active one.
+                for charge in charges:
+                    contract = contracts[charge.contract_id]
+                    settlement_contracts.setdefault(contract.property_id, set()).add(contract.id)
+            property_ids = {r.property_id for r in contracts.values()} | {r.property_id for r in records if hasattr(r, 'property_id') and r.property_id}
+            properties = {r.id: r for r in db.session.scalars(select(Property).where(Property.id.in_(property_ids)))} if property_ids else {}
+            person_ids = {r.tenant_id for r in contracts.values()} | {r.owner_id for r in records if hasattr(r, 'owner_id')}
+            people = {r.id: f'{r.first_name} {r.last_name}' for r in db.session.scalars(select(Person).where(Person.id.in_(person_ids)))} if person_ids else {}
+            rows = []
+            for record in records:
+                contract = contracts.get(getattr(record, 'contract_id', None))
+                prop = properties.get(contract.property_id if contract else getattr(record, 'property_id', None))
+                label = ' '.join(filter(None, [prop.address, prop.unit])) if prop else 'Gasto del negocio'
+                person = people.get(record.owner_id if detail == 'administration_fees' else contract.tenant_id if contract else None, '')
+                if detail == 'collections':
+                    amount, day = record.amount, record.payment_date
+                    note = f'{record.payment_method or "Pago"} · {record.reference or "Sin referencia"}'
+                elif detail == 'pending':
+                    amount, day = record.outstanding_balance, record.due_date
+                    note = f'Alquiler: {record.total_amount} {currency} · Cobrado: {record.paid_amount} {currency}'
+                elif detail == 'administration_fees':
+                    amount, day = record.administration_fee, record.settlement_date
+                    note = f'Liquidación #{record.id} · Bruto: {record.gross_amount} {currency}'
+                else:
+                    amount, day = record.amount, record.expense_date
+                    label = record.description or record.category
+                    note = f'{record.category} · ' + {'agency': 'Inmobiliaria', 'owner': 'Propietario', 'tenant': 'Inquilino'}.get(record.responsible_party, '')
+                    if prop:
+                        note += f' · {prop.address}'
+                related_contracts = sorted(settlement_contracts.get(record.property_id, set())) if detail == 'administration_fees' else [contract.id] if contract else []
+                href = f'/contratos/{related_contracts[0]}' if len(related_contracts) == 1 else f'/propietarios/{record.owner_id}' if detail == 'administration_fees' else None
+                if detail == 'expenses':
+                    href = f'/gastos?ficha={record.id}&period={year:04}-{month:02}&currency={currency}'
+                rows.append({'id': record.id, 'label': label, 'person': person, 'date': day.isoformat(), 'amount': str(amount), 'note': note,
+                             'href': href, 'contract_ids': related_contracts,
+                             'person_href': f'/propietarios/{record.owner_id}' if detail == 'administration_fees' else f'/inquilinos/{contract.tenant_id}' if contract else None})
+            result['rows'] = sorted(rows, key=lambda row: (row['date'], row['id']), reverse=True)
+        return result
 
     @staticmethod
     def upcoming(kind, arguments):
         days = integer(arguments.get("days", 30), "days", 0, 3660)
-        today = date.today()
+        today = business_today()
         until = today + timedelta(days=days)
         contracts = list(db.session.scalars(select(RentalContract).where(RentalContract.status == "active")))
         if kind == "expirations":
