@@ -70,3 +70,57 @@ def correct_charge(identifier):
 def service_controls(identifier):
     from app.services.utility_service import generate_controls
     return jsonify(generate_controls(identifier, json_body()))
+
+@workspace_bp.post('/contracts/<int:identifier>/adjustment-preview')
+def adjustment_preview(identifier):
+    from app.services.official_index_service import preview
+    return jsonify(preview(identifier, json_body()))
+
+@workspace_bp.post('/contracts/<int:identifier>/manual-adjustment-preview')
+def manual_adjustment_preview(identifier):
+    from app.services.official_index_service import manual_preview
+    return jsonify(manual_preview(identifier, json_body()))
+
+@workspace_bp.get('/contracts/<int:identifier>/adjustment-settings')
+def adjustment_settings(identifier):
+    from datetime import date
+    from app.services.management_service import APIError
+    from app.services.report_service import add_months
+    contract = get_record(RentalContract, identifier)
+    try:
+        effective = date.fromisoformat(request.args.get('effective_date', ''))
+    except (TypeError, ValueError):
+        raise APIError('Ingresá la fecha real de aplicación del aumento') from None
+    previous = max((a.effective_date for a in contract.adjustments if a.effective_date < effective), default=contract.start_date)
+    return jsonify({'initial_date': previous.isoformat(), 'ipc_from': previous.strftime('%Y-%m'),
+                    'ipc_to': add_months(effective.replace(day=1), -1).strftime('%Y-%m')})
+
+@workspace_bp.get('/contracts/<int:identifier>/rent-calculation')
+def rent_calculation(identifier):
+    from app.services.rental_schedule_service import calculate_rent
+    from app.services.report_service import period_arguments
+    year, month, _ = period_arguments(request.args)
+    contract = get_record(RentalContract, identifier)
+    return jsonify(calculate_rent(contract, year, month))
+
+@workspace_bp.route('/contracts/<int:identifier>/fees', methods=['GET', 'POST'])
+def contract_fees(identifier):
+    from app.services import contract_fee_service as fees
+    if request.method == 'GET':
+        return jsonify(fees.listing(identifier))
+    return jsonify(fees.create(identifier, json_body())), 201
+
+@workspace_bp.post('/contract-fees/<int:identifier>/payments')
+def fee_payment(identifier):
+    from app.services.contract_fee_service import pay
+    return jsonify(pay(identifier, json_body()))
+
+@workspace_bp.post('/contract-fees/<int:identifier>/cancel')
+def cancel_fee(identifier):
+    from app.services.contract_fee_service import cancel
+    return jsonify(cancel(identifier, json_body()))
+
+@workspace_bp.post('/contract-fee-payments/<int:identifier>/cancel')
+def cancel_fee_payment(identifier):
+    from app.services.contract_fee_service import cancel
+    return jsonify(cancel(identifier, json_body(), payment=True))

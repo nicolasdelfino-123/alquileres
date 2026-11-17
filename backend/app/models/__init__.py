@@ -1,4 +1,5 @@
 from app.models.charge_revision_model import ChargeRevision
+from app.models.contract_income_model import ContractFee, ContractFeePayment, OfficialIndex, AdjustmentQuote
 from app.models.communication_model import Communication
 from app.models.contract_guarantor_model import ContractGuarantor
 from app.models.property_model import Property

@@ -9,17 +9,61 @@ from sqlalchemy.orm import selectinload
 
 from app.extensions import db
 from app.models import (Property, Person, PropertyOwner, RentalContract, RentAdjustment,
-                        RentCharge, RentPayment, OwnerSettlement, OwnerTransfer, Expense, Document, Reminder)
+                        RentCharge, RentPayment, OwnerSettlement, OwnerTransfer, Expense, Document, Reminder, ContractFee, ContractFeePayment)
 from app.models.common import business_today, ZERO, utcnow
 from app.services.management_service import (APIError, FinanceService, ManagementService, get_record,
                                                serialize, money, transactional, convert)
 from app.services.report_service import period_arguments, add_months, integer
 
 
-def rent_on(contract, day):
-    adjustments = sorted(contract.adjustments, key=lambda a: (a.effective_date, a.id))
-    applicable = [a for a in adjustments if a.effective_date <= day]
-    return applicable[-1].new_amount if applicable else adjustments[0].previous_amount if adjustments else contract.current_rent
+from app.services.rental_schedule_service import rent_on, calculate_rent, period_bounds, validate_adjustment, scheduled_next
+
+
+def manual_adjustment_values(contract, base, data):
+    mode = data.get('mode', 'percentage')
+    def number(value, field='adjustment_percentage'):
+        return convert(RentAdjustment.__table__.c[field], value)
+    if mode == 'amount':
+        amount = number(data.get('new_amount'), 'new_amount')
+        if amount is None:
+            raise APIError('Ingresá el nuevo importe')
+        factor = amount / base if base else Decimal('1')
+        detail = {'mode': mode}
+    elif mode == 'ICL':
+        begin, finish = number(data.get('index_start')), number(data.get('index_end'))
+        if begin is None or finish is None or begin <= 0 or finish <= 0:
+            raise APIError('Cargá los valores ICL inicial y final de la fuente oficial')
+        factor = finish / begin
+        detail = {'mode': mode, 'initial': str(begin), 'final': str(finish)}
+    elif mode == 'IPC':
+        values = data.get('monthly_percentages')
+        if not isinstance(values, list) or not 1 <= len(values) <= 36:
+            raise APIError('Cargá las variaciones mensuales IPC del período, sin omitir meses')
+        factor = Decimal('1')
+        rates = []
+        for value in values:
+            rate = number(value)
+            if rate is None:
+                raise APIError('Falta una variación mensual IPC')
+            factor *= 1 + rate / 100
+            rates.append(str(rate))
+        detail = {'mode': mode, 'monthly_percentages': rates}
+    elif mode == 'percentage':
+        rate = number(data.get('percentage'))
+        if rate is None:
+            raise APIError('Ingresá el porcentaje acordado')
+        factor = 1 + rate / 100
+        detail = {'mode': mode, 'percentage': str(rate)}
+    else:
+        raise APIError('Método de ajuste inválido')
+    amount = amount if mode == 'amount' else money(base * factor)
+    if amount < base:
+        raise APIError('El nuevo importe no puede ser menor al anterior en este formulario')
+    rate = ((factor - 1) * 100).quantize(Decimal('.0001'))
+    source = data.get('source_url')
+    if source and (not isinstance(source, str) or len(source) > 500 or not source.startswith('https://')):
+        raise APIError('La fuente debe ser una dirección HTTPS válida')
+    return amount, factor, detail, mode, source
 
 
 def next_adjustment(contract):
@@ -28,7 +72,7 @@ def next_adjustment(contract):
     if not contract.adjustment_frequency_months:
         return None
     latest = max((item.effective_date for item in contract.adjustments), default=contract.start_date)
-    value = add_months(latest, contract.adjustment_frequency_months)
+    value = scheduled_next(contract, latest, contract.adjustment_frequency_months)
     return value if value and value <= contract.end_date else None
 
 
@@ -57,14 +101,14 @@ class RentalWorkspaceService:
         settlement_ids = [s.id for s in settlements]
         transfers = list(db.session.scalars(select(OwnerTransfer).where(OwnerTransfer.settlement_id.in_(settlement_ids)))) if settlement_ids else []
         documents = list(db.session.scalars(select(Document).order_by(Document.id.desc())))
-        current = [c for c in contracts if c.currency == currency and c.start_date <= end and c.end_date >= start and c.status != 'cancelled']
+        current = [c for c in contracts if c.currency == currency and c.start_date <= period_bounds(c, year, month)[1] and c.end_date >= period_bounds(c, year, month)[0] and c.status != 'cancelled']
         active_charges = [c for c in charges if not c.cancelled_at]
         rows = []
         for contract in current:
             charge = next((c for c in charges if c.contract_id == contract.id), None)
             adjustment = next_adjustment(contract)
             rows.append({'contract_id': contract.id, 'charge_id': charge.id if charge else None,
-                'rent_amount': str(charge.rent_amount if charge else rent_on(contract, start)),
+                'rent_amount': str(charge.rent_amount) if charge else calculate_rent(contract, year, month)['amount'],
                 'next_adjustment_date': adjustment.isoformat() if adjustment else None,
                 'status': charge.calculated_status if charge else 'not_generated'})
         return {'year': year, 'month': month, 'currency': currency,
@@ -97,14 +141,18 @@ class RentalWorkspaceService:
             if ids is not None and contract.id not in ids:
                 continue
             FinanceService.lock_property_for_contract(contract.id)
+            full_start, full_end = period_bounds(contract, year, month)
+            if full_start > contract.end_date or full_end < contract.start_date:
+                continue
             charge = db.session.scalar(select(RentCharge).where(RentCharge.contract_id == contract.id, RentCharge.period_year == year, RentCharge.period_month == month))
             if charge:
                 existing.append(charge.id)
                 continue
+            billing = calculate_rent(contract, year, month)
             due = date(year, month, min(contract.payment_day or 10, end.day))
-            due = min(max(due, contract.start_date), contract.end_date)
+            due = min(max(due, date.fromisoformat(billing['start'])), date.fromisoformat(billing['end']))
             charge = FinanceService.create_charges({'contract_id': contract.id, 'period_year': year, 'period_month': month,
-                'due_date': due.isoformat(), 'rent_amount': str(rent_on(contract, start))})
+                'due_date': due.isoformat()})
             created.append(charge.id)
         return {'message': f'{len(created)} mensualidades generadas; {len(existing)} ya estaban registradas.', 'created': created, 'existing': existing}
 
@@ -118,62 +166,25 @@ class RentalWorkspaceService:
             effective = date.fromisoformat(data.get('effective_date', ''))
         except (ValueError, TypeError):
             raise APIError('Ingresá una fecha de aplicación válida') from None
-        if not contract.start_date <= effective <= contract.end_date:
-            raise APIError('La fecha debe estar dentro del contrato')
-        if effective.day != 1:
-            raise APIError('El ajuste de mensualidades debe comenzar el primer día del mes')
-        if any(a.effective_date >= effective for a in contract.adjustments):
-            raise APIError('Ya existe un ajuste en esa fecha o posterior. Se conserva el historial.', 409)
-        if any(not c.cancelled_at and date(c.period_year, c.period_month, 1) >= effective for c in contract.charges):
-            raise APIError('Ya hay mensualidades generadas desde esa fecha. No se modifican importes registrados.', 409)
         base = rent_on(contract, effective)
-        mode = data.get('mode', 'percentage')
-        def number(value, field='adjustment_percentage'):
-            column = RentAdjustment.__table__.c[field]
-            return convert(column, value)
-        if mode == 'amount':
-            amount = number(data.get('new_amount'), 'new_amount')
-            if amount is None:
-                raise APIError('Ingresá el nuevo importe')
-            factor = amount / base if base else Decimal('1')
-            detail = {'mode': mode}
-        elif mode == 'ICL':
-            begin, finish = number(data.get('index_start')), number(data.get('index_end'))
-            if begin is None or finish is None or begin <= 0 or finish <= 0:
-                raise APIError('Cargá los valores ICL inicial y final de la fuente oficial')
-            factor = finish / begin
-            detail = {'mode': mode, 'initial': str(begin), 'final': str(finish)}
-        elif mode == 'IPC':
-            values = data.get('monthly_percentages')
-            if not isinstance(values, list) or not 1 <= len(values) <= 36:
-                raise APIError('Cargá las variaciones mensuales IPC del período, sin omitir meses')
-            factor = Decimal('1')
-            rates = []
-            for value in values:
-                rate = number(value)
-                if rate is None:
-                    raise APIError('Falta una variación mensual IPC')
-                factor *= 1 + rate / 100
-                rates.append(str(rate))
-            detail = {'mode': mode, 'monthly_percentages': rates}
-        elif mode == 'percentage':
-            rate = number(data.get('percentage'))
-            if rate is None:
-                raise APIError('Ingresá el porcentaje acordado')
-            factor = 1 + rate / 100
-            detail = {'mode': mode, 'percentage': str(rate)}
+        if data.get('mode') in {'official', 'preview'}:
+            from app.services.official_index_service import confirmed_quote
+            detail = confirmed_quote(identifier, data.get('quote_id'), effective, base)
+            factor = Decimal(detail['factor'])
+            amount = Decimal(detail['new_amount'])
+            mode = detail['kind']
+            source = detail.get('source_url')
+            treatment = detail.get('billing_treatment')
         else:
-            raise APIError('Método de ajuste inválido')
-        amount = amount if mode == 'amount' else money(base * factor)
-        if amount < base:
-            raise APIError('El nuevo importe no puede ser menor al anterior en este formulario')
+            amount, factor, detail, mode, source = manual_adjustment_values(contract, base, data)
+            treatment = data.get('billing_treatment')
+        treatment = validate_adjustment(contract, effective, treatment)
         rate = ((factor - 1) * 100).quantize(Decimal('.0001'))
-        source = data.get('source_url')
-        if source and (not isinstance(source, str) or len(source) > 500 or not source.startswith('https://')):
-            raise APIError('La fuente debe ser una dirección HTTPS válida')
+        detail['billing_treatment'] = treatment
+        detail['billing_cycle'] = contract.billing_cycle
         detail['base'] = str(base)
         adjustment = RentAdjustment(contract_id=contract.id, effective_date=effective, previous_amount=base,
-            new_amount=amount, adjustment_percentage=rate, index_name=mode if mode in {'IPC', 'ICL'} else contract.adjustment_index,
+            new_amount=amount, adjustment_percentage=rate, billing_treatment=treatment, index_name=mode if mode in {'IPC', 'ICL'} else 'Importe acordado' if mode == 'amount' else 'Porcentaje pactado',
             calculation_detail=json.dumps(detail), source_url=source or None, notes=data.get('notes') or None)
         from app.services.management_service import validate
         validate(adjustment)
@@ -181,7 +192,7 @@ class RentalWorkspaceService:
         if effective <= business_today():
             contract.current_rent = amount
         if contract.adjustment_frequency_months:
-            next_date = add_months(effective, contract.adjustment_frequency_months)
+            next_date = scheduled_next(contract, effective, contract.adjustment_frequency_months)
             contract.next_adjustment_date = next_date if next_date and next_date <= contract.end_date else None
         db.session.flush()
         return serialize(adjustment)
@@ -206,6 +217,7 @@ class RentalWorkspaceService:
             RentPayment.cancelled_at.is_(None), RentCharge.currency == currency)))
         expenses = list(db.session.scalars(select(Expense).where(Expense.expense_date >= date(year,1,1),
             Expense.expense_date < date(year+1,1,1), Expense.currency == currency)))
+        closing_payments = list(db.session.scalars(select(ContractFeePayment).join(ContractFee).where(ContractFee.currency == currency, ContractFee.cancelled_at.is_(None), ContractFeePayment.cancelled_at.is_(None), ContractFeePayment.payment_date >= date(year,1,1), ContractFeePayment.payment_date < date(year+1,1,1))))
         rows=[]
         for month in range(1,13):
             receipts = [p for p in payments if p.payment_date.month == month]
@@ -220,10 +232,11 @@ class RentalWorkspaceService:
                 own += rent_share * own_share
             spent = sum((e.amount for e in expenses if e.expense_date.month == month and e.responsible_party == 'agency'), ZERO)
             collected = sum((p.amount for p in receipts),ZERO)
-            net = money(fees+own-spent)
+            closing = sum((p.amount for p in closing_payments if p.payment_date.month == month), ZERO)
+            net = money(fees+own+closing-spent)
             rows.append({'month':month,'properties':len({p.charge.contract.property_id for p in receipts}),
-                'collected':str(money(collected)), 'fees':str(money(fees)), 'own_income':str(money(own)),
-                'expenses':str(spent), 'result':str(net), 'margin':str(money(net/(fees+own)*100)) if fees+own else None})
+                'closing_fees':str(money(closing)), 'collected':str(money(collected)), 'fees':str(money(fees)), 'own_income':str(money(own)),
+                'expenses':str(spent), 'result':str(net), 'margin':str(money(net/(fees+own+closing)*100)) if fees+own+closing else None})
         return {'year':year,'currency':currency,'months':rows}
 
     @staticmethod
@@ -277,7 +290,12 @@ class RentalWorkspaceService:
             raise APIError('Campo de corrección no admitido')
         fields=payload(RentCharge,{key:value for key,value in data.items() if key!='reason'})
         previous={key:serialize(record)[key] for key in allowed}
+        previous['rent_calculation'] = record.rent_calculation
         for key,value in fields.items():setattr(record,key,value)
+        if 'rent_amount' in fields:
+            record.rent_calculation = {'manual': True, 'amount': str(record.rent_amount),
+                                       'start': record.billing_start.isoformat() if record.billing_start else None,
+                                       'end': record.billing_end.isoformat() if record.billing_end else None}
         record.total_amount=record.rent_amount+record.other_charges-record.discounts
         if record.total_amount<0:raise APIError('Los descuentos superan la mensualidad')
         if not record.contract.start_date<=record.due_date<=record.contract.end_date:

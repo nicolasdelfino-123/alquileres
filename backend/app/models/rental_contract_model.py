@@ -6,6 +6,8 @@ from app.extensions import db
 
 class RentalContract(db.Model):
     utility_rules = db.Column(db.JSON, nullable=True)
+    billing_cycle = db.Column(db.String(20), nullable=False, default='calendar', server_default='calendar')
+    adjustment_billing_treatment = db.Column(db.String(20), nullable=True)
     __tablename__ = "rental_contracts"
     __table_args__ = (
         db.CheckConstraint("initial_rent >= 0 AND current_rent >= 0", name="ck_contract_rents"),

@@ -11,6 +11,7 @@ class RentAdjustment(db.Model):
     index_name = db.Column(db.String(50), nullable=True)
     calculation_detail = db.Column(db.Text, nullable=True)
     source_url = db.Column(db.String(500), nullable=True)
+    billing_treatment = db.Column(db.String(20), nullable=True)
 
     id = db.Column(db.Integer, primary_key=True)
     contract_id = db.Column(

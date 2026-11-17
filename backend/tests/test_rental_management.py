@@ -173,9 +173,12 @@ class RentalManagementTest(unittest.TestCase):
         self.assertEqual(result['outstanding_balance'], '260.00')
         balances = self.get(f"persons/{self.owner['id']}/settlements")
         self.assertEqual(balances['balances_by_currency'], {'ARS': '260.00'})
+        self.assertEqual(balances['summary_by_currency'], {'ARS': {'net': '360.00', 'transferred': '100.00', 'pending': '260.00'}})
         self.post('transfers', self.transfer(settlement, '261', 'TR-OVER'), 409)
         self.post('transfers', self.transfer(settlement, '260', 'TR-2'))
         self.assertEqual(self.get(f"settlements/{settlement['id']}")['status'], 'transferred')
+        summary = self.get(f"persons/{self.owner['id']}/settlements")['summary_by_currency']['ARS']
+        self.assertEqual(summary, {'net': '360.00', 'transferred': '360.00', 'pending': '0.00'})
 
     def test_transfer_duplicates(self):
         self.post('payments', self.payment())
@@ -185,6 +188,31 @@ class RentalManagementTest(unittest.TestCase):
         self.assertEqual(self.post('transfers', data)['id'], transfer['id'])
         self.post('transfers', self.transfer(settlement, idempotency_key='TR-OTHER'), 409)
         self.assertEqual(len(self.get('transfers')), 1)
+
+    def test_owner_unsettled_collections_respect_share_partial_settlements_and_cancellations(self):
+        response = self.client.patch(f"/api/property-owners/{self.ownership['id']}", json={'ownership_percentage': '50'})
+        self.assertEqual(response.status_code, 200)
+        other = self.post('persons', {'first_name': 'Otro', 'last_name': 'Dueño'})
+        self.post('property-owners', {'property_id': self.property['id'], 'person_id': other['id'], 'ownership_percentage': '50'})
+        payment = self.post('payments', self.payment())
+        path = f"persons/{self.owner['id']}/settlements"
+        self.assertEqual(self.get(path)['collected_unsettled_by_currency'], {'ARS': '200.00'})
+        settlement = self.post('settlements', self.settlement(gross_amount='100'))
+        self.assertEqual(self.get(path)['collected_unsettled_by_currency'], {'ARS': '100.00'})
+        self.post('settlements', self.settlement(owner_id=other['id'], idempotency_key='OTHER-SET'))
+        self.assertEqual(self.get(path)['collected_unsettled_by_currency'], {'ARS': '100.00'})
+        self.post(f"settlements/{settlement['id']}/cancel", {'reason': 'Prueba'}, 200)
+        self.assertEqual(self.get(path)['collected_unsettled_by_currency'], {'ARS': '200.00'})
+        # A payment on another property/currency must stay separate.
+        prop = self.post('properties', {'title': 'USD', 'address': 'USD', 'price': '100'})
+        self.post('property-owners', {'property_id': prop['id'], 'person_id': self.owner['id']})
+        contract = self.post('contracts', {'property_id': prop['id'], 'tenant_id': self.tenant['id'],
+            'start_date': self.start.isoformat(), 'end_date': self.end.isoformat(), 'initial_rent': '100', 'current_rent': '100', 'currency': 'USD'})
+        charge = self.post('charges', {'contract_id': contract['id'], 'period_year': self.year, 'period_month': self.month, 'due_date': self.today.isoformat()})
+        paid = self.post('payments', self.payment('75', 'USD-PAY', contract_id=contract['id'], charge_id=charge['id']))
+        self.assertEqual(self.get(path)['collected_unsettled_by_currency'], {'ARS': '200.00', 'USD': '75.00'})
+        self.post(f"payments/{paid['id']}/cancel", {'reason': 'Prueba'}, 200)
+        self.assertEqual(self.get(path)['collected_unsettled_by_currency'], {'ARS': '200.00'})
 
     def test_cancellation_dependency_order_and_audit(self):
         payment = self.post('payments', self.payment())
@@ -197,6 +225,7 @@ class RentalManagementTest(unittest.TestCase):
         cancelled = self.post(f"payments/{payment['id']}/cancel", {'reason': 'Corrección'}, 200)
         self.assertIsNotNone(cancelled['cancelled_at'])
         self.assertEqual(cancelled['cancellation_reason'], 'Corrección')
+        self.assertEqual(self.get(f"persons/{self.owner['id']}/settlements")['summary_by_currency'], {})
         self.assertEqual(len(self.get('payments')), 1)
         self.assertEqual(self.get(f"charges/{self.charge['id']}/balance")['outstanding_balance'], '1000.00')
         self.post('payments', self.payment(), 409)

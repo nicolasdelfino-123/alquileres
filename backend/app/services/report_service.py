@@ -1,13 +1,13 @@
 import calendar
 from datetime import date, timedelta
 from decimal import Decimal
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, func
 from sqlalchemy.orm import selectinload
 
 from app.extensions import db
-from app.models import RentalContract, RentAdjustment, RentCharge, RentPayment, OwnerSettlement, Expense, Person, Property, RentalContractTenant
+from app.models import RentalContract, RentAdjustment, RentCharge, RentPayment, OwnerSettlement, Expense, Person, Property, PropertyOwner, RentalContractTenant
 from app.models.common import business_today, ZERO
-from app.services.management_service import APIError, get_record, serialize
+from app.services.management_service import APIError, get_record, serialize, money
 
 
 def integer(value, name, minimum, maximum):
@@ -62,8 +62,44 @@ class ReportService:
     @staticmethod
     def owner_balances(identifier):
         get_record(Person, identifier)
-        settlements = list(db.session.scalars(select(OwnerSettlement).where(OwnerSettlement.owner_id == identifier).order_by(OwnerSettlement.id)))
+        settlements = list(db.session.scalars(select(OwnerSettlement).options(selectinload(OwnerSettlement.transfers)).where(OwnerSettlement.owner_id == identifier).order_by(OwnerSettlement.id)))
+        totals = {}
+        for settlement in settlements:
+            if settlement.cancelled_at:
+                continue
+            row = totals.setdefault(settlement.currency, {"net": ZERO, "transferred": ZERO, "pending": ZERO})
+            row["net"] += settlement.net_amount
+            row["transferred"] += settlement.transferred_amount
+            row["pending"] += settlement.outstanding_balance
+        # Same gross availability used when creating a settlement, grouped by property/period.
+        ownerships = dict(db.session.execute(select(PropertyOwner.property_id, PropertyOwner.ownership_percentage)
+            .where(PropertyOwner.person_id == identifier)).all())
+        allocated, owner_allocated = {}, {}
+        for property_id, year, month, currency, owner_id, amount in db.session.execute(
+            select(OwnerSettlement.property_id, OwnerSettlement.period_year, OwnerSettlement.period_month,
+                   OwnerSettlement.currency, OwnerSettlement.owner_id, func.sum(OwnerSettlement.gross_amount))
+            .where(OwnerSettlement.property_id.in_(ownerships), OwnerSettlement.cancelled_at.is_(None))
+            .group_by(OwnerSettlement.property_id, OwnerSettlement.period_year, OwnerSettlement.period_month,
+                      OwnerSettlement.currency, OwnerSettlement.owner_id)):
+            key = (property_id, year, month, currency)
+            allocated[key] = allocated.get(key, ZERO) + amount
+            if owner_id == identifier:
+                owner_allocated[key] = amount
+        unsettled = {}
+        for property_id, year, month, currency, collected in db.session.execute(
+            select(RentalContract.property_id, RentCharge.period_year, RentCharge.period_month,
+                   RentCharge.currency, func.sum(RentPayment.amount))
+            .select_from(RentPayment)
+            .join(RentCharge, RentPayment.charge_id == RentCharge.id).join(RentalContract, RentCharge.contract_id == RentalContract.id)
+            .where(RentalContract.property_id.in_(ownerships), RentCharge.cancelled_at.is_(None), RentPayment.cancelled_at.is_(None))
+            .group_by(RentalContract.property_id, RentCharge.period_year, RentCharge.period_month, RentCharge.currency)):
+            key = (property_id, year, month, currency)
+            available = max(ZERO, min(collected - allocated.get(key, ZERO),
+                money(collected * ownerships[property_id] / Decimal('100')) - owner_allocated.get(key, ZERO)))
+            unsettled[currency] = unsettled.get(currency, ZERO) + available
         return {"owner_id": identifier, "balances_by_currency": balances_by_currency(settlements),
+                "collected_unsettled_by_currency": {currency: str(value) for currency, value in unsettled.items()},
+                "summary_by_currency": {currency: {key: str(value) for key, value in row.items()} for currency, row in totals.items()},
                 "settlements": [serialize(s) for s in settlements]}
 
     @staticmethod
@@ -142,6 +178,7 @@ class ReportService:
 
     @staticmethod
     def upcoming(kind, arguments):
+        from app.services.rental_schedule_service import scheduled_next
         days = integer(arguments.get("days", 30), "days", 0, 3660)
         today = business_today()
         until = today + timedelta(days=days)
@@ -158,9 +195,9 @@ class ReportService:
                 base = max((a.effective_date for a in adjustments if a.effective_date < today), default=contract.start_date)
                 months_elapsed = max(0, (today.year - base.year) * 12 + today.month - base.month)
                 steps = max(1, months_elapsed // frequency)
-                next_date = add_months(base, steps * frequency)
+                next_date = scheduled_next(contract, base, steps * frequency)
                 if next_date and next_date < today:
-                    next_date = add_months(base, (steps + 1) * frequency)
+                    next_date = scheduled_next(contract, base, (steps + 1) * frequency)
             if next_date and today <= next_date <= until and next_date <= contract.end_date:
                 results.append({"contract_id": contract.id, "property_id": contract.property_id,
                                 "tenant_id": contract.tenant_id, "tenant_ids": contract.tenant_ids, "next_adjustment_date": next_date.isoformat(),

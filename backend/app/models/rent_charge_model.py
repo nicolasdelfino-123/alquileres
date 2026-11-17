@@ -28,6 +28,9 @@ class RentCharge(CancellationMixin, db.Model):
     administration_percentage = db.Column(db.Numeric(5, 2), nullable=False, default=ZERO)
     status = db.Column(db.String(30), nullable=False, default="pending")
     notes = db.Column(db.Text)
+    billing_start = db.Column(db.Date, nullable=True)
+    billing_end = db.Column(db.Date, nullable=True)
+    rent_calculation = db.Column(db.JSON, nullable=True)
     contract = db.relationship("RentalContract", back_populates="charges")
     payments = db.relationship("RentPayment", back_populates="charge")
 

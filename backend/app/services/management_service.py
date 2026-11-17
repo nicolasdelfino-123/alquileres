@@ -182,6 +182,10 @@ def validate(record, creating=False, check_overlap=True):
         if not re.fullmatch(r"\d{22}",record.cbu):
             raise APIError("El CBU debe tener 22 dígitos, sin espacios")
     if isinstance(record, RentalContract):
+        if (record.billing_cycle or 'calendar') not in {'calendar', 'anniversary'}:
+            raise APIError('Elegí cobro por mes calendario o por aniversario del contrato')
+        if record.adjustment_billing_treatment not in {None, 'prorate', 'whole_period', 'next_period'}:
+            raise APIError('Tratamiento de aumentos dentro del período inválido')
         if record.collection_cbu:
             import re
             if not re.fullmatch(r"\d{22}",record.collection_cbu):
@@ -419,7 +423,7 @@ class ManagementService:
             key in {"property_id", "start_date", "end_date", "status"} and value != getattr(record, key)
             for key, value in values.items())
         if isinstance(record, RentalContract) and record.charges:
-            protected = {"property_id", "tenant_id", "currency", "start_date", "end_date"}
+            protected = {"property_id", "tenant_id", "currency", "start_date", "end_date", "billing_cycle"}
             if any(key in protected and value != getattr(record, key) for key, value in values.items()):
                 raise APIError("No se puede cambiar la identidad o período de un contrato con mensualidades", 409)
         for key, value in values.items():
@@ -493,7 +497,7 @@ class FinanceService:
 
     @staticmethod
     def create_charges(data):
-        values = payload(RentCharge, data, {"total_amount", "status", "currency", "administration_percentage"})
+        values = payload(RentCharge, data, {"total_amount", "status", "currency", "administration_percentage", "billing_start", "billing_end", "rent_calculation"})
         values = {**DEFAULTS[RentCharge], **values}
         contract = FinanceService.lock_property_for_contract(values.get("contract_id"))
         if contract.status != "active":
@@ -503,15 +507,16 @@ class FinanceService:
         record = RentCharge(**values)
         if record.period_year is None or record.period_month is None:
             raise APIError("period_year y period_month son obligatorios")
-        start = period(record)
-        end = date(start.year, start.month, calendar.monthrange(start.year, start.month)[1])
-        if end < contract.start_date or start > contract.end_date:
-            raise APIError("El período no corresponde al contrato")
+        from app.services.rental_schedule_service import calculate_rent
+        period(record)
+        calculation = calculate_rent(contract, record.period_year, record.period_month)
+        record.billing_start = date.fromisoformat(calculation['start'])
+        record.billing_end = date.fromisoformat(calculation['end'])
         if record.rent_amount is None:
-            adjustment = db.session.scalar(select(RentAdjustment).where(
-                RentAdjustment.contract_id == contract.id,
-                RentAdjustment.effective_date <= start).order_by(RentAdjustment.effective_date.desc(), RentAdjustment.id.desc()))
-            record.rent_amount = adjustment.new_amount if adjustment else contract.current_rent
+            record.rent_amount = Decimal(calculation['amount'])
+            record.rent_calculation = calculation
+        else:
+            record.rent_calculation = {'manual': True, 'amount': str(record.rent_amount), 'start': calculation['start'], 'end': calculation['end']}
         record.total_amount = record.rent_amount + record.other_charges - record.discounts
         if record.total_amount < 0:
             raise APIError("Los descuentos superan el importe de la mensualidad")

@@ -16,11 +16,13 @@ def init_mail_runtime(app):
         from app.models.mail_outbox_model import AuthRateBucket, MailOutbox
         from app.models.auth_token_model import AuthToken
         from app.models.communication_model import Communication
+        from app.models.contract_income_model import AdjustmentQuote
         cutoff = utcnow() - timedelta(days=7)
         db.session.execute(delete(AuthRateBucket).where(AuthRateBucket.expires_at < utcnow()))
         expired = select(AuthToken.id).where(AuthToken.expires_at < cutoff)
         db.session.execute(delete(MailOutbox).where(MailOutbox.token_id.in_(expired)))
         db.session.execute(delete(AuthToken).where(AuthToken.expires_at < cutoff))
+        db.session.execute(delete(AdjustmentQuote).where(AdjustmentQuote.expires_at < cutoff))
         db.session.execute(delete(Communication).where(Communication.status != "pending", Communication.created_at < utcnow() - timedelta(days=400)))
         db.session.commit()
 
